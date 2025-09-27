@@ -15,17 +15,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          persist-credentials: false  # Avoid credential conflicts for tagging
+          fetch-depth: 0  # Fetch full history for tag detection
 
       - name: Setup Git
         run: |
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
+          # Configure HTTPS authentication with GITHUB_TOKEN
+          git config --global credential.helper 'store --file=/tmp/git-credentials'
+          echo "https://${{ secrets.GITHUB_TOKEN }}:x-oauth-basic@github.com" > /tmp/git-credentials
 
       - name: Bump version and create tag
         uses: anothrNick/github-tag-action@v1
+        env:
+          DEFAULT_BUMP: patch  # Force patch bump
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: patch
           release_branches: main
+    
