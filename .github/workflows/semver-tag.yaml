@@ -9,13 +9,13 @@ jobs:
   tag:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # Required for pushing tags
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Fetch full history for tag detection
 
       - name: Setup Git
         run: |
@@ -23,11 +23,12 @@ jobs:
           git config user.email "action@github.com"
 
       - name: Bump version and create tag
-        uses: anothrNick/github-tag-action@1.67.0
+        uses: anothrNick/github-tag-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEFAULT_BUMP: patch
-          RELEASE_BRANCHES: main
-          ANNOTATED_TAGS: true
-          VERBOSE: true
-          INITIAL_VERSION: 0.1.0
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Auth for GitHub API or Git pushes
+          DEFAULT_BUMP: patch  # Default to patch version bump (e.g., 0.1.0 -> 0.1.1)
+          RELEASE_BRANCHES: main  # Only tag on main branch
+          ANNOTATED_TAGS: true  # Create annotated tags
+          VERBOSE: true  # Enable detailed logging
+          INITIAL_VERSION: 0.1.0  # Starting version if no tags exist
+          GIT_API_TAGGING: false  # Use Git CLI instead of API for pushing tags
