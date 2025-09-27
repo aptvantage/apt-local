@@ -1,0 +1,100 @@
+#!/bin/bash
+set -euo pipefail
+
+# apt-local: A thin wrapper around k3d for managing a local k8s cluster that makes it easy
+# to expose services via ingress locally with no port-forwarding
+
+K3D_CLUSTER_NAME=apt-local
+
+function _isInstalled() {
+    k3d cluster get $K3D_CLUSTER_NAME > /dev/null 2>&1
+    echo $?
+}
+
+function _k3dInstalled() {
+  which k3d > /dev/null 2>&1
+  echo $?
+}
+
+function _mkcertInstalled() {
+  which mkcert > /dev/null 2>&1
+  echo $?
+}
+
+
+
+function _create() {
+  installed=$(_isInstalled)
+  if [[ "0" -eq $installed ]]; then
+    echo "apt-local is already created"
+    return
+  fi
+
+  installed=$(_k3dInstalled)
+  if [[ "0" -ne $installed ]]; then
+    echo "apt-local cluster creation failed"
+    echo -e "\tk3d could not be found"
+    echo -e "\tk3d must be on the PATH"
+    echo -e "\tinstall with: brew install k3d"
+    exit 1
+  fi
+
+  installed=$(_mkcertInstalled)
+  if [[ "0" -ne $installed ]]; then
+    echo "apt-local cluster creation failed"
+    echo -e "\tmkcert could not be found"
+    echo -e "\tmkcert must be on the PATH"
+    echo -e "\tinstall with: brew install mkcert"
+    exit 1
+  fi
+
+  echo "installing apt-local cluster..."
+  k3d cluster create $K3D_CLUSTER_NAME --agents 1 -p "8080:80@loadbalancer" -p "8443:443@loadbalancer"
+
+  tmp_dir=$(mktemp -d)
+  cd "$tmp_dir"
+  # install certificate for ssl
+  echo "You may be prompted for root credentials which are required to install a root CA"
+  echo "This is required in order to trust certificates generated locally by this cluster for the *.apt-local.me domain"
+  mkcert -install
+  mkcert -key-file tls.key -cert-file tls.crt apt-local.me "*.apt-local.me"
+  kubectl create secret tls apt-local-me-tls --cert=tls.crt --key=tls.key
+  cd - > /dev/null 2>&1
+
+
+}
+
+function _delete() {
+  installed=$(_isInstalled)
+  if [[ "0" -eq $installed ]]; then
+    k3d cluster delete $K3D_CLUSTER_NAME
+    echo "apt-local cluster has been removed"
+  fi
+}
+
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 {create|delete|start|stop}"
+  exit 1
+fi
+
+CMD=$1
+shift
+
+case $CMD in
+  start)
+    k3d cluster start $K3D_CLUSTER_NAME "$@"
+    ;;
+  stop)
+    k3d cluster stop $K3D_CLUSTER_NAME "$@"
+    ;;
+  create)
+    _create
+    ;;
+  delete)
+    _delete
+    ;;
+  *)
+    echo "Unknown command. Usage: $0 {create|delete|start|stop}"
+    exit 1
+    ;;
+esac
