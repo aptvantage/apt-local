@@ -21,6 +21,50 @@ function _mkcertInstalled() {
   echo $?
 }
 
+function _waitForKnativeServing() {
+  start_time=$(date +%s)
+  timeout=300  # 5 minutes in seconds
+
+  while true; do
+    elapsed=$(( $(date +%s) - start_time ))
+    if [ $elapsed -ge $timeout ]; then
+      echo "Timeout reached after $timeout seconds. Knative Serving is not ready."
+      exit 1
+    fi
+
+    status=$(kubectl get knativeserving knative-serving -n knative-serving -o json | jq -r '.status.conditions[] | select(.type == "Ready") | .status' 2>/dev/null || echo "Unknown")
+    if [ "$status" = "True" ]; then
+      echo "Knative Serving is ready"
+      break
+    fi
+    echo "Waiting for Knative Serving to be ready... (current ready state: $status, elapsed: ${elapsed}s)"
+    sleep 3
+  done
+
+}
+
+function _waitForKnativeEventing() {
+  start_time=$(date +%s)
+  timeout=300  # 5 minutes in seconds
+
+  while true; do
+    elapsed=$(( $(date +%s) - start_time ))
+    if [ $elapsed -ge $timeout ]; then
+      echo "Timeout reached after $timeout seconds. Knative Serving is not ready."
+      exit 1
+    fi
+
+    status=$(kubectl get knativeeventing knative-eventing -n knative-eventing -o json | jq -r '.status.conditions[] | select(.type == "Ready") | .status' 2>/dev/null || echo "Unknown")
+    if [ "$status" = "True" ]; then
+      echo "Knative Eventing is ready"
+      break
+    fi
+    echo "Waiting for Knative Eventing to be ready... (current ready state: $status, elapsed: ${elapsed}s)"
+    sleep 3
+  done
+
+}
+
 
 
 function _create() {
@@ -49,7 +93,8 @@ function _create() {
   fi
 
   echo "installing apt-local cluster..."
-  k3d cluster create $K3D_CLUSTER_NAME --agents 1 -p "8080:80@loadbalancer" -p "8443:443@loadbalancer"
+#  k3d cluster create $K3D_CLUSTER_NAME --agents 1 -p "8080:80@loadbalancer" -p "8443:443@loadbalancer"
+  k3d cluster create $K3D_CLUSTER_NAME --agents 2 --k3s-arg "--disable=traefik@server:0" --port "8080:80@loadbalancer" --port "8443:443@loadbalancer" --image rancher/k3s:v1.32.9-k3s1
 
   tmp_dir=$(mktemp -d)
   cd "$tmp_dir"
@@ -61,6 +106,74 @@ function _create() {
   kubectl create secret tls apt-local-me-tls --cert=tls.crt --key=tls.key
   cd - > /dev/null 2>&1
 
+  echo "installing the knative operator..."
+  #TODO -- this should probably be a specific version
+  kubectl apply -f https://github.com/knative/operator/releases/latest/download/operator.yaml
+  echo "waiting for operator installation to complete"
+  kubectl rollout status deployment/knative-operator -n knative-operator --timeout=90s
+  if [[ "0" -ne $? ]]; then
+    echo "Failed to install knative operator"
+    exit 1
+  fi
+
+  echo "installing knative serving..."
+  cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knative-serving
+---
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec:
+  ingress:
+    kourier:
+      enabled: true
+  config:
+    network:
+      ingress-class: "kourier.ingress.networking.knative.dev"
+      #https: "true"
+    domain:
+      "apt-local.me": ""
+  #controller-custom-certs:
+  #  name: default-apt-local-me-tls
+  #  type: Secret
+EOF
+
+  _waitForKnativeServing
+
+  echo "installing knative eventing..."
+  cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knative-eventing
+---
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeEventing
+metadata:
+  name: knative-eventing
+  namespace: knative-eventing
+EOF
+  _waitForKnativeEventing
+
+  echo "installing sample application..."
+  cat << EOF | kubectl apply --namespace=default -f -
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/cloudrun/hello
+EOF
+  echo "sample hello app installed at http://hello.default.apt-local.me:8080"
+  echo "installation complete"
 
 }
 
