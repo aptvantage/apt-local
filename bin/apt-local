@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# apt-local: A thin wrapper around k3d for managing a local k8s cluster that makes it easy
+# apt-local: A thin wrapper around k3d for managing a local knative k8s cluster that makes it easy
 # to expose services via ingress locally with no port-forwarding
 
 K3D_CLUSTER_NAME=apt-local
+CONFIG_DIR=../etc
 
 function _isInstalled() {
     k3d cluster get $K3D_CLUSTER_NAME > /dev/null 2>&1
@@ -68,6 +69,7 @@ function _waitForKnativeEventing() {
 
 
 function _create() {
+  # TODO - verify ports are available
   installed=$(_isInstalled)
   if [[ "0" -eq $installed ]]; then
     echo "apt-local is already created"
@@ -93,8 +95,29 @@ function _create() {
   fi
 
   echo "installing apt-local cluster..."
-#  k3d cluster create $K3D_CLUSTER_NAME --agents 1 -p "8080:80@loadbalancer" -p "8443:443@loadbalancer"
-  k3d cluster create $K3D_CLUSTER_NAME --agents 2 --k3s-arg "--disable=traefik@server:0" --port "8080:80@loadbalancer" --port "8443:443@loadbalancer" --image rancher/k3s:v1.32.9-k3s1
+  k3d cluster create $K3D_CLUSTER_NAME --agents 2 --api-port 6550 --k3s-arg "--disable=traefik@server:0" --port "8080:80@loadbalancer" --port "8443:443@loadbalancer" --image rancher/k3s:v1.32.9-k3s1
+
+  # install knative operator
+  kubectl apply -f "$CONFIG_DIR/knative-operator.yaml"
+  echo "waiting for knative operator installation to complete"
+  kubectl rollout status deployment/knative-operator -n knative-operator --timeout=90s
+  if [[ "0" -ne $? ]]; then
+    echo "Failed to install knative operator"
+    exit 1
+  fi
+
+  # install knative Contour
+  echo "installing Contour..."
+  kubectl apply -f "$CONFIG_DIR/knative-contour.yaml"
+
+  # install knative serving and eventing
+  # install both at the same time to parallelize the startup because
+  # these both take a little while to spin up
+  echo "installing knative serving and eventing..."
+  kubectl apply -f "$CONFIG_DIR/knative-serving.yaml"
+  kubectl apply -f "$CONFIG_DIR/knative-eventing.yaml"
+  _waitForKnativeServing
+  _waitForKnativeEventing
 
   tmp_dir=$(mktemp -d)
   cd "$tmp_dir"
@@ -102,77 +125,28 @@ function _create() {
   echo "You may be prompted for root credentials which are required to install a root CA"
   echo "This is required in order to trust certificates generated locally by this cluster for the *.apt-local.me domain"
   mkcert -install
-  mkcert -key-file tls.key -cert-file tls.crt apt-local.me "*.apt-local.me"
-  kubectl create secret tls apt-local-me-tls --cert=tls.crt --key=tls.key
+  mkcert -key-file apt-local-key.pem -cert-file apt-local-cert.pem "*.apt-local.me"
+  kubectl create -n contour-external secret tls apt-local-tls \
+    --key apt-local-key.pem \
+    --cert apt-local-cert.pem
   cd - > /dev/null 2>&1
+  kubectl apply -f "$CONFIG_DIR/certificate-delegation.yaml"
 
-  echo "installing the knative operator..."
-  #TODO -- this should probably be a specific version
-  kubectl apply -f https://github.com/knative/operator/releases/latest/download/operator.yaml
-  echo "waiting for operator installation to complete"
-  kubectl rollout status deployment/knative-operator -n knative-operator --timeout=90s
-  if [[ "0" -ne $? ]]; then
-    echo "Failed to install knative operator"
-    exit 1
-  fi
+  kubectl patch configmap config-contour -n knative-serving \
+    -p '{"data":{"default-tls-secret":"contour-external/apt-local-tls"}}'
 
-  echo "installing knative serving..."
-  cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: knative-serving
----
-apiVersion: operator.knative.dev/v1beta1
-kind: KnativeServing
-metadata:
-  name: knative-serving
-  namespace: knative-serving
-spec:
-  ingress:
-    kourier:
-      enabled: true
-  config:
-    network:
-      ingress-class: "kourier.ingress.networking.knative.dev"
-      #https: "true"
-    domain:
-      "apt-local.me": ""
-  #controller-custom-certs:
-  #  name: default-apt-local-me-tls
-  #  type: Secret
-EOF
+  kubectl patch configmap config-network -n knative-serving \
+    -p '{"data":{"domain-template":"{{.Name}}.{{.Domain}}"}}'
 
-  _waitForKnativeServing
+  kubectl patch configmap config-network -n knative-serving \
+    -p '{"data":{"external-domain-tls":"Enabled"}}'
 
-  echo "installing knative eventing..."
-  cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: knative-eventing
----
-apiVersion: operator.knative.dev/v1beta1
-kind: KnativeEventing
-metadata:
-  name: knative-eventing
-  namespace: knative-eventing
-EOF
-  _waitForKnativeEventing
+  kubectl patch configmap config-network -n knative-serving \
+    -p '{"data":{"default-external-scheme":"https"}}'
 
   echo "installing sample application..."
-  cat << EOF | kubectl apply --namespace=default -f -
-apiVersion: serving.knative.dev/v1
-kind: Service
-metadata:
-  name: hello
-spec:
-  template:
-    spec:
-      containers:
-        - image: gcr.io/cloudrun/hello
-EOF
-  echo "sample hello app installed at http://hello.default.apt-local.me:8080"
+  kubectl apply -f "$CONFIG_DIR/sample-application.yaml"
+  echo "sample hello app installed at https://hello.apt-local.me:8443"
   echo "installation complete"
 
 }
